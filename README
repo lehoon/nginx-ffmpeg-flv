@@ -1,0 +1,303 @@
+# 版本
+nginx:      1.23.3
+openssl:    1.1.1l
+pcre:       8.45
+zlib:       1.2.13
+
+# 安装环境
+   * msys2
+   * perl
+   
+
+# 编译
+修改perl环境变量,使用安装的perl代替mingw自带的perl
+```
+export PATH=/c/home/Strawberry/perl/bin:$PATH
+```
+
+```
+auto/configure --with-cc=cl --builddir=build/output --prefix= \
+--conf-path=conf/nginx.conf --pid-path=logs/nginx.pid \
+--http-log-path=logs/access.log --error-log-path=logs/error.log \
+--sbin-path=nginx-flv.exe --http-client-body-temp-path=temp/client_body_temp \
+--http-proxy-temp-path=temp/proxy_temp \
+--http-fastcgi-temp-path=temp/fastcgi_temp \
+--http-scgi-temp-path=temp/scgi_temp \
+--http-uwsgi-temp-path=temp/uwsgi_temp \
+--with-cc-opt=-DFD_SETSIZE=1024 --with-pcre=build/lib/pcre-8.45 \
+--with-zlib=build/lib/zlib-1.2.13 --with-openssl=build/lib/openssl-1.1.1l \
+--with-select_module --with-http_ssl_module \
+--add-module=build/lib/nginx-http-flv-module
+```
+
+# 使用
+## nginx配置
+```
+worker_processes  1;
+
+error_log  logs/error.log error;
+
+events {
+    worker_connections  1024;
+}
+
+http {
+    include mime.types;
+    default_type application/octet-stream;
+
+    keepalive_timeout 65;
+
+    server {
+        listen      8080;
+        server_name localhost;
+		
+        location / {
+            root html;
+            index index.html index.htm;
+        }
+		
+        error_page 500 502 503 504 /50x.html;
+
+        location = /50x.html {
+            root html;
+        }
+
+        location /live {
+            flv_live on; #打开HTTP播放FLV直播流功能
+            chunked_transfer_encoding on; #支持'Transfer-Encoding: chunked'方式回复
+            add_header 'Access-Control-Allow-Origin' '*'; #添加额外的HTTP头
+            add_header 'Access-Control-Allow-Credentials' 'true'; #添加额外的 HTTP 头
+        }
+
+        location /hls {  
+            #server hls fragments  
+            types {  
+                application/vnd.apple.mpegurl m3u8;  
+                video/mp2t ts;  
+            }
+
+            alias temp/hls;
+            expires -1;
+            add_header 'Cache-Control' 'no-cache';
+        }  
+
+        location /dash {
+            root /tmp;
+            add_header 'Cache-Control' 'no-cache';
+        }
+
+        location /stat {
+            rtmp_stat all;
+            rtmp_stat_stylesheet stat.xsl;
+        }
+
+        location /stat.xsl {
+            root html;
+        }
+		
+
+        location /control {
+            rtmp_control all;
+        }
+    }
+}
+
+rtmp_auto_push on;
+rtmp_auto_push_reconnect 1s;
+rtmp_socket_dir temp/socket;
+
+rtmp {
+
+    out_queue   4096;
+    out_cork    8;
+    max_streams 128;
+    timeout     15s;
+    drop_idle_publisher 15s;
+    log_interval 5s;
+    log_size     1m;
+
+    server {
+        listen 1935;
+
+        server_name localhost;
+
+        #application live1 {
+        #    live on;
+        #}
+
+        application myapp {
+            live on;
+            gop_cache on; #打开gop 缓存 减少首屏等待时间
+        }
+		
+        application hls {
+            live on;
+            hls on;  
+            hls_path temp/hls;  
+            hls_fragment 8s;  
+        }
+
+        application dash {
+            live on;
+            dash on;
+            dash_path temp/dash;
+        }
+    }
+}
+```
+
+## ffmpeg推流
+```
+@echo off
+
+@rem "推送摄像头设备rstp流转码hls到nginx"  copy  不转码
+ffmpeg -i rtsp://admin:12345678@192.168.1.172 -c copy -f flv -an "rtmp://localhost:1935/myapp/haikang01"
+
+@rem "推送摄像头设备rstp流转码hls到nginx"   转码到h264   转码cpu会高很多
+@rem ffmpeg -i rtsp://admin:12345678@192.168.1.172 -vcodec h264 -f flv -an "rtmp://localhost:1935/myapp/haikang01"
+```
+
+## flv.js播放
+在nginx/html下新建 flv文件夹,在文件夹新建index.html文件，输入一下内容
+```
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+    <title>flv.js demo</title>
+
+    <style>
+        .mainContainer {
+            display: block;
+            width: 1024px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        .urlInput {
+            display: block;
+            width: 100%;
+            margin-left: auto;
+            margin-right: auto;
+            margin-top: 8px;
+            margin-bottom: 8px;
+        }
+
+        .centeredVideo {
+            display: block;
+            width: 100%;
+            height: 576px;
+            margin-left: auto;
+            margin-right: auto;
+            margin-bottom: auto;
+        }
+
+        .controls {
+            display: block;
+            width: 100%;
+            text-align: left;
+            margin-left: auto;
+            margin-right: auto;
+            margin-top: 8px;
+            margin-bottom: 10px;
+        }
+
+        .logcatBox {
+            border-color: #CCCCCC;
+            font-size: 11px;
+            font-family: Menlo, Consolas, monospace;
+            display: block;
+            width: 100%;
+            text-align: left;
+            margin-left: auto;
+            margin-right: auto;
+        }
+    </style>
+</head>
+
+<body>
+    
+    <div class="mainContainer">
+        <video name="videoElement" class="centeredVideo" id="videoElement" controls width="1024" height="576" autoplay>
+            Your browser is too old which doesn't support HTML5 video.
+        </video>
+
+    </div>
+
+    <script src="flv.min.js?v=2"></script>
+    
+    <script>
+         if (flvjs.isSupported()) {
+            startVideo()
+        }
+
+        function startVideo(){
+            var videoElement = document.getElementById('videoElement');
+            var flvPlayer = flvjs.createPlayer({
+                type: 'flv',
+                isLive: true,
+                //hasAudio: false,
+                hasVideo: true,
+                stashInitialSize: 128, // 减少首帧显示等待时长
+                enableWorker: true, // 启用分离的线程进行转换
+                enableStashBuffer: false, // 关闭IO隐藏缓冲区
+                url: 'http://localhost:8080/live?port=1935&app=myapp&stream=haikang01'
+            });
+
+            flvPlayer.attachMediaElement(videoElement);
+
+            //追帧操作
+            videoElement.addEventListener("progress", () => {
+                let end = flvPlayer.buffered.end(0); //获取当前buffered值(缓冲区末尾)
+                let delta = end - flvPlayer.currentTime; //获取buffered与当前播放位置的差值
+
+                //console.log('===================' + end + ', ' + delta);
+                // 延迟过大，通过跳帧的方式更新视频
+                if (delta > 10 || delta < 0) {
+                    flvPlayer.currentTime = flvPlayer.buffered.end(0) - 1;
+                    return;
+                }
+
+                // 追帧
+                if (delta > 1) {
+                    videoElement.playbackRate = 1.1;
+                } else {
+                    videoElement.playbackRate = 1;
+                }
+            });
+
+
+            flvPlayer.load();
+            flvPlayer.play();
+        }
+
+
+
+        videoElement.addEventListener('click', function(){
+            //alert( '是否支持点播视频：' + flvjs.getFeatureList().mseFlvPlayback + ' 是否支持httpflv直播流：' + flvjs.getFeatureList().mseLiveFlvPlayback )
+        })
+
+        function destoryVideo(){
+            flvPlayer.pause();
+            flvPlayer.unload();
+            flvPlayer.detachMediaElement();
+            flvPlayer.destroy();
+            flvPlayer = null;
+        }
+
+        function reloadVideo(){
+            destoryVideo()
+            startVideo()
+        }
+
+    </script>
+</body>
+</html>
+```
+
+## 启动
+ * 1、window下打开cmd，进入nginx目录下,输入nginx启动nginx
+ * 2、window下打开cmd，进入nginx目录下执行ffmpeg推流命令
+ * 3、打开浏览器输入http://localhost:8080/flv回车
+
